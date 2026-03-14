@@ -13,8 +13,8 @@ export class AwsService {
     config.update({
       region: 'ap-south-1',
       credentials: new Credentials(
-        process.env.AWS_ACCESS_KEY_ID,
-        process.env.AWS_SECRET_ACCESS_KEY
+        'dummy-access-key',
+        'dummy-secret-key'
       )
     })
   }
