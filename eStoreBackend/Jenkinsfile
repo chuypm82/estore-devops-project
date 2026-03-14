@@ -1,0 +1,156 @@
+pipeline {
+    agent any
+    environment {
+        DB_HOST = 'estore-mysql'
+        DB_NAME = 'estoredb'
+        DB_USER = 'admin'
+        DB_PASS = 'admin123'
+        BACKEND_PATH = "${env.WORKSPACE}/eStoreBackend"
+        FRONTEND_PATH = "${env.WORKSPACE}"
+        MYSQL_DATA = "${env.WORKSPACE}/estore-mysql-data"
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Cloning repository..."
+                git branch: 'main',
+                    url: 'https://github.com/chuypm82/estore-devops-project.git',
+                    credentialsId: 'github-pat1'
+            }
+        }
+        stage('Start MySQL') {
+            steps {
+                echo "Starting MySQL container..."
+                sh """
+                mkdir -p ${MYSQL_DATA}
+                if ! docker network ls --format '{{.Name}}' | grep -q '^estore-net\$'; then
+                    docker network create estore-net
+                fi
+                if ! docker ps -a --format '{{.Names}}' | grep -q '^estore-mysql\$'; then
+                    docker run -d --name estore-mysql \\
+                      --network estore-net \\
+                      -v ${MYSQL_DATA}:/var/lib/mysql \\
+                      -e MYSQL_ROOT_PASSWORD=root123 \\
+                      -e MYSQL_DATABASE=${DB_NAME} \\
+                      -e MYSQL_USER=${DB_USER} \\
+                      -e MYSQL_PASSWORD=${DB_PASS} \\
+                      mysql:8.0
+                else
+                    docker start estore-mysql >/dev/null 2>&1 || true
+                fi
+                """
+                echo "Waiting for MySQL..."
+                sh """
+                MAX_TRIES=20
+                TRIES=0
+                until docker exec estore-mysql mysqladmin ping -h "127.0.0.1" --silent; do
+                    printf "."
+                    sleep 3
+                    TRIES=\$((TRIES+1))
+                    if [ \$TRIES -ge \$MAX_TRIES ]; then
+                        echo "ERROR: MySQL failed to start"
+                        docker logs estore-mysql
+                        exit 1
+                    fi
+                done
+                echo "MySQL ready"
+                """
+            }
+        }
+        stage('Maven Build') {
+            steps {
+                echo "Building backend with Maven..."
+                dir("${BACKEND_PATH}") {
+                    sh 'mvn clean package -DskipTests'
+                }
+            }
+        }
+        stage('Docker Build') {
+            steps {
+                echo "Building backend Docker image..."
+                sh "docker build -t estore-backend ${BACKEND_PATH}"
+                echo "Building frontend Docker image..."
+                sh "docker build -t estore-frontend ${FRONTEND_PATH}"
+            }
+        }
+        stage('Start Backend') {
+            steps {
+                echo "Starting backend container..."
+                sh """
+                if ! docker ps -a --format '{{.Names}}' | grep -q '^estore-backend\$'; then
+                    docker run -d --name estore-backend \\
+                      --network estore-net \\
+                      -p 9090:8080 \\
+                      estore-backend
+                else
+                    docker start estore-backend >/dev/null 2>&1 || true
+                fi
+                """
+            }
+        }
+        stage('Initialize Database') {
+            steps {
+                echo "Waiting for backend to create 'admins' table..."
+                sh """
+                MAX_TRIES=20
+                TRIES=0
+                until [ \$(docker exec estore-mysql mysql -u${DB_USER} -p${DB_PASS} -N -e "USE ${DB_NAME}; SHOW TABLES LIKE 'admins';" | wc -l) -gt 0 ]; do
+                    echo "Waiting for 'admins' table..."
+                    sleep 3
+                    TRIES=\$((TRIES+1))
+                    if [ \$TRIES -ge \$MAX_TRIES ]; then
+                        echo "ERROR: 'admins' table not found. Backend may have failed."
+                        docker logs estore-backend
+                        exit 1
+                    fi
+                done
+                echo "'admins' table detected"
+                """
+                echo "Seeding database with admin and test users..."
+                sh """
+                docker exec -i estore-mysql mysql -u${DB_USER} -p${DB_PASS} ${DB_NAME} -e "
+                INSERT IGNORE INTO admins (admin_id, email, password, full_Name, login_Type, added_On)
+                VALUES (101,'admin@example.com','admin12345','Admin User',1,NOW());
+                INSERT IGNORE INTO admins (admin_id, email, password, full_Name, login_Type, added_On)
+                VALUES (102,'admin2@example.com','admin12345','Admin User2',1,NOW());
+                INSERT IGNORE INTO users (user_id, email, password)
+                VALUES (1001,'TestUser1@example.com','TestUser1');
+                INSERT IGNORE INTO users (user_id, email, password)
+                VALUES (1002,'TestUser2@example.com','TestUser2');
+                INSERT IGNORE INTO users (user_id, email, password)
+                VALUES (1003,'TestUser3@example.com','TestUser3');
+                "
+                """
+                echo "Database seeding complete"
+            }
+        }
+        stage('Start Frontend') {
+            steps {
+                echo "Starting frontend container..."
+                sh """
+                if ! docker ps -a --format '{{.Names}}' | grep -q '^estore-frontend\$'; then
+                    docker run -d --name estore-frontend \\
+                      --network estore-net \\
+                      -p 4200:80 \\
+                      estore-frontend
+                else
+                    docker start estore-frontend >/dev/null 2>&1 || true
+                fi
+                """
+            }
+        }
+    }
+    post {
+        success {
+            echo "========================================"
+            echo "EStore Deployment Successful"
+            echo "Frontend: http://localhost:4200"
+            echo "Backend : http://localhost:9090"
+            echo "Admin Login: admin@example.com / admin12345"
+            echo "========================================"
+        }
+        failure {
+            echo "Pipeline failed. Check logs above."
+        }
+    }
+}

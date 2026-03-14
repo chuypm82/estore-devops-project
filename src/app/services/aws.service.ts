@@ -1,0 +1,30 @@
+import { Injectable } from '@angular/core';
+import { S3, config, Credentials } from 'aws-sdk';
+
+@Injectable({
+  providedIn: 'root'
+})
+export class AwsService {
+
+  BUCKET_NAME: string = 'estore-bucket';
+
+  constructor() { 
+    // AWS Credentials
+    config.update({
+      region: 'ap-south-1',
+      credentials: new Credentials(
+        process.env.AWS_ACCESS_KEY_ID,
+        process.env.AWS_SECRET_ACCESS_KEY
+      )
+    })
+  }
+
+  getS3Ref() {
+    return new S3({
+      apiVersion: '2006-03-01',
+      params: {
+        Bucket: this.BUCKET_NAME
+      }
+    })
+  }
+}
